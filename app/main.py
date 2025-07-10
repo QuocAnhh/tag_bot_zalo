@@ -247,37 +247,115 @@ async def smax_webhook_v2(request: Request, x_api_key: str = Header(None)):
         response_message = "Xin lỗi, hệ thống đang gặp sự cố. Vui lòng thử lại sau."
 
     # Chỉ trả về message nếu intent khác 'unknown'
-    if intent == "unknown":
-        return JSONResponse(status_code=200, content={})
-    else:
-        return JSONResponse(status_code=200, content={
-            "message": response_message,
-            "pid": pid,
-            "page_pid": page_pid
-        })
+    return JSONResponse(status_code=200, content={
+        "message": response_message if intent != "unknown" else "Xin lỗi, tôi chưa hiểu yêu cầu của bạn.",
+        "pid": pid,
+        "page_pid": page_pid
+    })
 
 
 def analyze_intent_v2(message_text):
+    print(f"[DEBUG] analyze_intent_v2 input: {message_text}")
     message = message_text.lower()
-    if "báo cáo" in message and "tháng" in message:
+    # call_report_today
+    if re.search(r"báo cáo.*hôm nay|số cuộc gọi.*ngày|thống kê.*hôm nay|cuộc gọi.*today", message):
+        print(f"[DEBUG] analyze_intent_v2 output: call_report_today, {{}}")
+        return "call_report_today", {}
+    # call_report_week
+    if re.search(r"báo cáo.*tuần|thống kê.*tuần|cuộc gọi.*tuần|weekly.*report", message):
+        print(f"[DEBUG] analyze_intent_v2 output: call_report_week, {{}}")
+        return "call_report_week", {}
+    # call_report_month
+    if re.search(r"báo cáo.*tháng|thống kê.*tháng|cuộc gọi.*tháng|monthly.*report", message):
+        print(f"[DEBUG] analyze_intent_v2 output: call_report_month, {{}}")
         return "call_report_month", {}
+    # system_status
+    if re.search(r"trạng thái.*hệ thống|kiểm tra.*hệ thống|hệ thống.*thế nào|system.*status|health.*check", message):
+        print(f"[DEBUG] analyze_intent_v2 output: system_status, {{}}")
+        return "system_status", {}
+    # phone_config
+    if re.search(r"cấu hình.*số|config.*phone|thiết lập.*điện thoại|setup.*number", message):
+        phone_pattern = r'(\+?84|0)[0-9]{8,10}'
+        phone_match = re.search(phone_pattern, message)
+        params = {"phone_number": phone_match.group()} if phone_match else {}
+        print(f"[DEBUG] analyze_intent_v2 output: phone_config, {params}")
+        return "phone_config", params
+    # phone_list
+    if re.search(r"danh sách.*số|số điện thoại.*nào|list.*phone|show.*numbers", message):
+        print(f"[DEBUG] analyze_intent_v2 output: phone_list, {{}}")
+        return "phone_list", {}
+    # check_order
     if "kiểm tra trạng thái đơn hàng" in message:
         order_id = re.findall(r"đơn hàng (\w+)", message)
-        return "check_order", {"order_id": order_id[0]} if order_id else {}
-    return "unknown", {}
+        params = {"order_id": order_id[0]} if order_id else {}
+        print(f"[DEBUG] analyze_intent_v2 output: check_order, {params}")
+        return "check_order", params
+    # Trích xuất thời gian
+    params = {}
+    if "hôm qua" in message:
+        params["period"] = "yesterday"
+    elif "tuần trước" in message:
+        params["period"] = "last_week"
+    elif "tháng trước" in message:
+        params["period"] = "last_month"
+    print(f"[DEBUG] analyze_intent_v2 output: unknown, {params}")
+    return "unknown", params
 
-# Business logic mẫu
 
 def handle_business_logic_v2(intent, params, body):
+    print(f"[DEBUG] intent: {intent}, params: {params}")
+    if intent == "call_report_today":
+        data = smax_service.get_call_report("today")
+        print(f"[DEBUG] call_report_today data: {data}")
+        result = response_formatter.format_call_report(data, "today")
+        print(f"[DEBUG] formatted result: {result}")
+        return result
+    if intent == "call_report_week":
+        data = smax_service.get_call_report("week")
+        print(f"[DEBUG] call_report_week data: {data}")
+        result = response_formatter.format_call_report(data, "week")
+        print(f"[DEBUG] formatted result: {result}")
+        return result
     if intent == "call_report_month":
-        return get_monthly_report_v2()
+        data = smax_service.get_call_report("month")
+        print(f"[DEBUG] call_report_month data: {data}")
+        result = response_formatter.format_call_report(data, "month")
+        print(f"[DEBUG] formatted result: {result}")
+        return result
+    if intent == "system_status":
+        data = smax_service.get_system_status()
+        print(f"[DEBUG] system_status data: {data}")
+        result = response_formatter.format_system_status(data)
+        print(f"[DEBUG] formatted result: {result}")
+        return result
+    if intent == "phone_list":
+        data = smax_service.get_phone_config()
+        print(f"[DEBUG] phone_list data: {data}")
+        result = response_formatter.format_phone_config(data)
+        print(f"[DEBUG] formatted result: {result}")
+        return result
+    if intent == "phone_config":
+        phone_number = params.get("phone_number")
+        print(f"[DEBUG] phone_config phone_number: {phone_number}")
+        if phone_number:
+            result = smax_service.configure_phone(phone_number)
+            print(f"[DEBUG] configure_phone result: {result}")
+            formatted = response_formatter.format_config_result(result)
+            print(f"[DEBUG] formatted result: {formatted}")
+            return formatted
+        else:
+            formatted = response_formatter.format_config_result("❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`")
+            print(f"[DEBUG] formatted result: {formatted}")
+            return formatted
     if intent == "check_order":
         order_id = params.get("order_id")
-        return check_order_status_v2(order_id)
-    return "Xin lỗi, tôi chưa hiểu yêu cầu của bạn."
-
-def get_monthly_report_v2():
-    return "📈 **BÁO CÁO THÁNG**\nTổng số cuộc gọi: 123\n..."
+        print(f"[DEBUG] check_order order_id: {order_id}")
+        result = check_order_status_v2(order_id)
+        print(f"[DEBUG] check_order result: {result}")
+        return result  # Trả về chuỗi đơn giản, không dùng format_config_result
+    formatted = response_formatter.format_unknown_command()
+    print(f"[DEBUG] formatted result: {formatted}")
+    return formatted
 
 def check_order_status_v2(order_id):
     if not order_id:
@@ -342,107 +420,8 @@ async def process_intent(intent_result: dict) -> str:
             result = smax_service.configure_phone(phone_number)
             return response_formatter.format_config_result(result)
         else:
-            return "❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`"
-    
-    else:
-        return response_formatter.format_unknown_command()
-
-@app.post("/test/webhook")
-async def test_webhook():
-    """Test endpoint với fake webhook data và SMAX integration"""
-    fake_webhook = {
-        "event_type": "message_received",
-        "data": {
-            "message_id": "test_123",
-            "user_id": "user_456", 
-            "display_name": "Test User"
-        },
-        "raw": {
-            "message": "@BotBiva báo cáo cuộc gọi hôm nay",
-            "mentions": [
-                {
-                    "user_id": os.getenv("BOT_ID", "default_bot_id"),
-                    "display_name": "BotBiva",
-                    "start": 0,
-                    "end": 8
-                }
-            ]
-        }
-    }
-    
-    # Tạo mock request
-    class MockRequest:
-        async def json(self):
-            return fake_webhook
-    
-    request_mock = MockRequest()
-    
-    return await handle_smax_webhook(request_mock)
-
-@app.get("/stats")
-async def get_bot_stats():
-    """Endpoint để xem thống kê bot"""
-    # Có thể track số lượng requests, intents, etc.
-    return JSONResponse(
-        status_code=200,
-        content={
-            "bot_status": "active",
-            "bot_id": os.getenv("BOT_ID"),
-            "webhook_url": os.getenv("WEBHOOK_URL"),
-            "last_updated": datetime.now().isoformat(),
-            "supported_intents": [
-                "call_report_today",
-                "call_report_week", 
-                "call_report_month",
-                "system_status",
-                "phone_list",
-                "phone_config"
-            ],
-            "ngrok_url": os.getenv("NGROK_URL")
-        }
-    )
-
-@app.post("/test/mention")
-async def test_mention_detection():
-    """Test endpoint để kiểm tra mention detection"""
-    test_data = {
-        "event_type": "test_mention",
-        "data": {
-            "message_id": "test_123",
-            "user_id": "test_user",
-            "display_name": "Test User"
-        },
-        "raw": {
-            "message": "@BotBiva test mention detection",
-            "mentions": [
-                {
-                    "user_id": os.getenv("BOT_ID"),
-                    "display_name": "BotBiva",
-                    "start": 0,
-                    "end": 8
-                }
-            ]
-        }
-    }
-    
-    webhook_data = SMaxWebhook(**test_data)
-    is_mentioned = mention_checker.is_bot_mentioned(webhook_data)
-    command = mention_checker.extract_command_text(webhook_data)
-    
-    return JSONResponse(
-        status_code=200,
-        content={
-            "bot_mentioned": is_mentioned,
-            "extracted_command": command,
-            "bot_id": os.getenv("BOT_ID"),
-            "test_data": test_data
-        }
-    )
+            return response_formatter.format_config_result("❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`")
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

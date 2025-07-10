@@ -13,37 +13,34 @@ class FakeDataService:
         today = datetime.now()
         return {
             "today": {
-                "total_calls": random.randint(10, 50),
-                "successful_calls": random.randint(8, 45),
-                "failed_calls": random.randint(1, 5),
-                "avg_duration": f"{random.randint(30, 180)} giây"
+                "total_calls": 42,
+                "successful_calls": 35,
+                "failed_calls": 7,
+                "avg_duration": "120 giây"
             },
             "week": {
-                "total_calls": random.randint(100, 300),
-                "successful_calls": random.randint(80, 250),
-                "failed_calls": random.randint(5, 20),
+                "total_calls": 210,
+                "successful_calls": 180,
+                "failed_calls": 30,
                 "daily_breakdown": [
-                    {"date": (today - timedelta(days=i)).strftime("%d/%m"), 
-                     "calls": random.randint(5, 25)} 
-                    for i in range(7)
+                    {"date": (today - timedelta(days=i)).strftime("%d/%m"), "calls": 30 - i} for i in range(7)
                 ]
             },
             "month": {
-                "total_calls": random.randint(500, 1500),
-                "growth_rate": f"+{random.randint(5, 25)}%",
-                "busiest_hour": f"{random.randint(9, 17)}:00"
+                "total_calls": 900,
+                "growth_rate": "+15%",
+                "busiest_hour": "10:00"
             }
         }
     
     def _generate_system_status(self) -> Dict[str, Any]:
         """Fake system status"""
-        statuses = ["Hoạt động tốt", "Cảnh báo", "Bảo trì"]
         return {
-            "overall_status": random.choice(statuses),
-            "uptime": f"{random.randint(90, 99)}.{random.randint(0, 9)}%",
+            "overall_status": "Hoạt động tốt",
+            "uptime": "98.7%",
             "last_restart": "2 ngày trước",
-            "active_lines": random.randint(5, 12),
-            "queue_length": random.randint(0, 5)
+            "active_lines": 8,
+            "queue_length": 2
         }
     
     def _generate_phone_configs(self) -> Dict[str, Any]:
@@ -71,21 +68,13 @@ class FakeDataService:
     
     def configure_phone(self, phone_number: str) -> Dict[str, Any]:
         """Fake cấu hình số điện thoại mới"""
-        success = random.choice([True, True, True, False])  # 75% success rate
+        return {
+            "success": True,
+            "message": f"Đã cấu hình thành công số {phone_number}",
+            "new_config": {
+                "phone": phone_number,
+                "status": "active",
+                "configured_at": datetime.now().strftime("%H:%M %d/%m/%Y")
+            }
+        }
         
-        if success:
-            return {
-                "success": True,
-                "message": f"Đã cấu hình thành công số {phone_number}",
-                "new_config": {
-                    "phone": phone_number,
-                    "status": "active",
-                    "configured_at": datetime.now().strftime("%H:%M %d/%m/%Y")
-                }
-            }
-        else:
-            return {
-                "success": False,
-                "message": f"Không thể cấu hình số {phone_number}. Vui lòng thử lại!",
-                "error": "CONNECTION_TIMEOUT"
-            }
