@@ -17,12 +17,31 @@ class MentionChecker:
                 mentions = raw_data["mentions"]
                 if isinstance(mentions, list):
                     for mention in mentions:
-                        if isinstance(mention, dict) and mention.get("user_id") == self.bot_id:
-                            return True
+                        if isinstance(mention, dict):
+                            user_id = mention.get("user_id")
+                            display_name = mention.get("display_name", "")
+                            # Check bot ID hoặc display name
+                            if user_id == self.bot_id or "BotBiva" in display_name or "botbiva" in display_name.lower():
+                                return True
             
+            # Kiểm tra message text để tìm mention
             message = raw_data.get("message", "")
-            if f"@{self.bot_id}" in message or "@BotBiva" in message:
-                return True
+            mention_patterns = [
+                f"@{self.bot_id}",
+                "@BotBiva", 
+                "@botbiva",
+                "@Quốc Anh",
+                "@quốc anh", 
+                "bot biva",
+                "Bot Biva",
+                "BOT BIVA",
+                "Quốc Anh",
+                "quốc anh"
+            ]
+            
+            for pattern in mention_patterns:
+                if pattern.lower() in message.lower():
+                    return True
             
             return False
             
@@ -31,12 +50,30 @@ class MentionChecker:
             return False
     
     def extract_command_text(self, webhook_data: SMaxWebhook) -> str:
-        """abtract text command sau khi loại bỏ mention"""
+        """abstract text command sau khi loại bỏ mention"""
         try:
             message = webhook_data.raw.get("message", "")
             
-            # Loại bỏ mention khỏi message
-            cleaned_message = message.replace(f"@{self.bot_id}", "").replace("@BotBiva", "")
+            # Loại bỏ tất cả các dạng mention khỏi message
+            mention_patterns = [
+                f"@{self.bot_id}",
+                "@BotBiva", 
+                "@botbiva",
+                "@Quốc Anh",
+                "@quốc anh",
+                "bot biva",
+                "Bot Biva", 
+                "BOT BIVA",
+                "Quốc Anh",
+                "quốc anh"
+            ]
+            
+            cleaned_message = message
+            for pattern in mention_patterns:
+                cleaned_message = cleaned_message.replace(pattern, "")
+            
+            # Loại bỏ extra spaces
+            cleaned_message = " ".join(cleaned_message.split())
             
             return cleaned_message.strip()
             
