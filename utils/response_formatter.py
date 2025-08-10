@@ -100,14 +100,16 @@ Vui lòng thử lại sau! 🔄"""
     @staticmethod
     def format_unknown_command() -> str:
         """Format cho lệnh không hiểu"""
-        return """❓ **LỆNH KHÔNG ĐƯỢC NHẬN DIỆN**
+        return """🤖 **ZALO-BIVA-BOT RESPONSE**
 
-Các lệnh có sẵn:
-• `báo cáo cuộc gọi hôm nay`
-• `thống kê tuần này` 
-• `báo cáo tháng`
-• `kiểm tra trạng thái hệ thống`
-• `danh sách số điện thoại`
-• `cấu hình số [số_điện_thoại]`
+❓ Xin lỗi, tôi không hiểu lệnh này.
 
-Ví dụ: `@BotBiva báo cáo cuộc gọi hôm nay` 🤖"""
+📋 **Các lệnh có sẵn:**
+• `báo cáo hôm nay` - Báo cáo cuộc gọi hôm nay
+• `báo cáo tuần` - Báo cáo tuần
+• `báo cáo tháng` - Báo cáo tháng  
+• `trạng thái hệ thống` - Kiểm tra hệ thống
+• `show numbers` - Danh sách số điện thoại
+• `cấu hình số [SDT]` - Cấu hình số mới
+
+💡 Hãy thử lại với một trong các lệnh trên!"""

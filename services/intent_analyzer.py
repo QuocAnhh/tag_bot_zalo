@@ -41,7 +41,10 @@ class SimpleIntentAnalyzer:
                 r"danh sách.*số",
                 r"số điện thoại.*nào",
                 r"list.*phone",
-                r"show.*numbers"
+                r"show.*numbers",
+                r"phone.*list",
+                r"list phone",  # Exact match for "list phone"
+                r"phone.*config.*list"
             ]
         }
     
@@ -49,10 +52,10 @@ class SimpleIntentAnalyzer:
         """Phân tích intent từ command text"""
         command_lower = command_text.lower()
         
-        # Tìm intent
+        # tìm intent
         detected_intent = self._detect_intent(command_lower)
         
-        # Trích xuất parameters
+        # lấy paramêtrs
         parameters = self._extract_parameters(command_lower, detected_intent)
         
         return {
@@ -74,13 +77,13 @@ class SimpleIntentAnalyzer:
         """trích xuất parameters từ text"""
         params = {}
         
-        # Trích xuất số điện thoại
+        # bóc tách số điện thoại
         phone_pattern = r'(\+?84|0)[0-9]{8,10}'
         phone_match = re.search(phone_pattern, text)
         if phone_match:
             params["phone_number"] = phone_match.group()
         
-        # Trích xuất thời gian
+        # bóc tách thời gian
         if "hôm qua" in text:
             params["period"] = "yesterday"
         elif "tuần trước" in text:

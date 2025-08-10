@@ -1,427 +1,271 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
 import uvicorn
-import os
 from datetime import datetime
-from dotenv import load_dotenv
-
 import sys
 import os
+import json
+import logging
+from typing import Dict, Any, Callable, Awaitable
+import httpx
+from contextlib import asynccontextmanager
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.models.webhook import SMaxWebhook, BotResponse
-from services.mention_checker import MentionChecker
 from services.intent_analyzer import SimpleIntentAnalyzer
 from services.smax_service import SmaxService
 from services.webhook_service import WebhookService
 from utils.response_formatter import ResponseFormatter
-
-import logging
-import requests
-import re
+from config import SMAX_API_KEY
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-load_dotenv()
+# reusable http client that will be initialized on startup
+http_client = None
 
-app = FastAPI(title="Zalo Bot", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Manages the application's lifespan events.
+    Initializes the HTTP client on startup and closes it on shutdown.
+    """
+    global http_client
+    logging.info("🚀 Starting up application...")
+    http_client = httpx.AsyncClient(timeout=10.0)
+    
+    # Pass the client to services that need it
+    webhook_service.set_http_client(http_client)
+    
+    yield
+    
+    logging.info("👋 Shutting down application...")
+    if http_client:
+        await http_client.aclose()
 
-mention_checker = MentionChecker()
+app = FastAPI(title="Zalo Bot", version="1.0.0", lifespan=lifespan)
+
+# Add middleware to log ALL incoming requests for debugging
+@app.middleware("http")
+async def log_all_requests(request: Request, call_next):
+    start_time = datetime.now()
+    logging.info(f"🌍 INCOMING: {request.method} {request.url}")
+    logging.info(f"🌍 Headers: {dict(request.headers)}")
+    
+    # For POST requests, also log the body
+    if request.method == "POST":
+        body = await request.body()
+        if body:
+            logging.info(f"🌍 Body: {body.decode('utf-8', errors='replace')}")
+        
+        # Recreate request for next handler
+        async def receive():
+            return {"type": "http.request", "body": body}
+        
+        request = Request(request.scope, receive)
+    
+    response = await call_next(request)
+    duration = (datetime.now() - start_time).total_seconds()
+    logging.info(f"🌍 Response: {response.status_code} ({duration:.3f}s)")
+    return response
+
 intent_analyzer = SimpleIntentAnalyzer()
 smax_service = SmaxService()
 webhook_service = WebhookService()
 response_formatter = ResponseFormatter()
 
-SMAX_API_KEY = os.getenv("SMAX_API_KEY", "your_smax_api_key")
-SMAX_RESPONSE_WEBHOOK_URL = os.getenv("SMAX_RESPONSE_WEBHOOK_URL", "https://api.smax.ai/public/bizs/hotline-biva/triggers/686f2dcbe2c4b0887fffb708")
-SMAX_TOKEN = os.getenv("SMAX_TOKEN", "your_smax_token")
+INTENT_HANDLERS: Dict[str, Callable[..., Awaitable[Dict[str, Any]]]] = {
+    "call_report_today": lambda params: smax_service.get_call_report("today"),
+    "call_report_week": lambda params: smax_service.get_call_report("week"),
+    "call_report_month": lambda params: smax_service.get_call_report("month"),
+    "system_status": lambda params: smax_service.get_system_status(),
+    "phone_list": lambda params: smax_service.get_phone_config(),
+    "phone_config": lambda params: smax_service.configure_phone(params.get("phone_number")),
+}
 
-def parse_intent(message: str) -> dict:
-    """Parse intent từ message, trả về dict response phù hợp cho block Zalo"""
-    msg = message.lower()
-    if "báo cáo hôm nay" in msg:
-        return {"messages": [{"type": "text", "text": "Tổng số cuộc gọi hôm nay là 12 cuộc."}]}
-    # Có thể mở rộng thêm các intent khác ở đây
-    return {"messages": [{"type": "text", "text": "Xin lỗi, tôi chưa hiểu yêu cầu của bạn."}]}
+FORMATTER_MAPPING: Dict[str, Callable[..., str]] = {
+    "call_report_today": lambda data: response_formatter.format_call_report(data, "today"),
+    "call_report_week": lambda data: response_formatter.format_call_report(data, "week"),
+    "call_report_month": lambda data: response_formatter.format_call_report(data, "month"),
+    "system_status": response_formatter.format_system_status,
+    "phone_list": response_formatter.format_phone_config,
+    "phone_config": response_formatter.format_config_result,
+}
 
+async def handle_intent(intent_result: dict) -> str:
+    """
+    Handles business logic based on the analyzed intent.
+    Uses mappings to call the correct service method and format the response.
+    """ 
+    intent = intent_result.get("intent")
+    params = intent_result.get("parameters", {})
+    logging.info(f"Handling intent: {intent} with params: {params}")
+
+    if intent == "phone_config" and not params.get("phone_number"):
+        return "❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`"
+
+    handler = INTENT_HANDLERS.get(intent)
+    if not handler:
+        logging.warning(f"No handler found for intent: {intent}")
+        return response_formatter.format_unknown_command()
+
+    data = await handler(params)
+    
+    formatter = FORMATTER_MAPPING.get(intent)
+    if not formatter:
+        logging.error(f"No formatter found for intent: {intent}")
+        return response_formatter.format_unknown_command()
+
+    return formatter(data)
+
+async def parse_request_body(request: Request) -> Dict[str, Any]:
+    """Parses and logs the request body, handling potential errors."""
+    try:
+        body_bytes = await request.body()
+        if not body_bytes:
+            logging.warning("Empty body received. This could be a health check.")
+            return {}
+        body_str = body_bytes.decode('utf-8')
+        logging.info(f"Request body: {body_str}")
+        return json.loads(body_str)
+    except json.JSONDecodeError as e:
+        logging.error(f"JSON decode error: {e} - Raw body: {body_bytes.decode(errors='replace')}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+    except UnicodeDecodeError as e:
+        logging.error(f"Unicode decode error: {e}") 
+        raise HTTPException(status_code=400, detail="Invalid request encoding.")
+
+def get_message_text(body: Dict[str, Any], headers: Dict[str, str] = None) -> str:
+    """Extracts the message text from various possible fields in the payload or headers."""
+    if headers:
+        message_from_header = headers.get("last_content_by_user")
+        if message_from_header and "{{" not in message_from_header:
+            logging.info(f"Extracted message from header 'last_content_by_user': '{message_from_header}'")
+            return message_from_header.strip()
+    
+    message_text = (
+        body.get("message_text")  
+        or body.get("last_content_by_user")  #smax sent
+        or body.get("message")
+        or body.get("text")
+        or (body.get("raw", {}).get("message") if isinstance(body.get("raw"), dict) else None)
+    )
+    
+    result = message_text.strip() if message_text else ""
+    return result
+
+def is_smax_test_payload(body: Dict[str, Any]) -> bool:
+    """Checks if the payload is a test request from SMAX."""
+    smax_template_patterns = ["{{$.user id}}", "{{$.group id}}", "{{$."]
+    user_id = str(body.get("user_id", ""))
+    group_id = str(body.get("group_id", ""))
+    return any(p in user_id for p in smax_template_patterns) or \
+           any(p in group_id for p in smax_template_patterns)
+
+# api endpoints
 @app.get("/")
 async def root():
-    return {"message": "Zalo Bot Demo is running!", "status": "active"}
+    return {"message": "Zalo Bot is running!", "status": "active"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": "2025-07-09 07:13:01"}
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.get("/webhook/config")
-async def get_webhook_config():
-    """Kiểm tra cấu hình webhook"""
-    try:
-        config = webhook_service.validate_webhook_setup()
-        return JSONResponse(
-            status_code=200,
-            content=config
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+@app.get("/webhook/zalo-biva", status_code=200)
+async def verify_smax_webhook():
+    """
+    Handles the GET request from SMAX for webhook verification.
+    This is a standard procedure for many webhook providers before they
+    start forwarding actual data via POST requests.
+    """
+    logging.info("Received GET request for Zalo-Biva webhook verification. Responding with success to confirm endpoint validity.")
+    return {"status": "verification_successful"}
 
-@app.post("/webhook/zalo")
-async def handle_zalo_webhook(request: Request):
-    """Xử lý webhook trực tiếp từ Zalo"""
-    try:
-        body = await request.json()
-        print(f"📥 Received Zalo webhook: {body}")
-        
-        # Convert Zalo webhook format thành SMaxWebhook format
-        zalo_webhook = {
-            "event_type": body.get("event_name", "message_received"),
-            "data": {
-                "message_id": body.get("message", {}).get("msg_id", ""),
-                "user_id": body.get("sender", {}).get("id", ""),
-                "display_name": body.get("sender", {}).get("name", "")
-            },
-            "raw": {
-                "message": body.get("message", {}).get("text", ""),
-                "mentions": body.get("message", {}).get("mentions", [])
-            }
-        }
-        
-        webhook_data = SMaxWebhook(**zalo_webhook)
-        
-        if not mention_checker.is_bot_mentioned(webhook_data):
-            return JSONResponse(
-                status_code=200,
-                content={"message": "Bot not mentioned, ignored"}
-            )
-        
-        command_text = mention_checker.extract_command_text(webhook_data)
-        print(f"💬 Zalo Command: {command_text}")
-        
-        intent_result = intent_analyzer.analyze(command_text)
-        print(f"🧠 Zalo Intent: {intent_result}")
-        
-        response_text = await process_intent(intent_result)
-        
-        # Format response cho Zalo
-        zalo_response = {
-            "recipient": {
-                "user_id": body.get("sender", {}).get("id", "")
-            },
-            "message": {
-                "text": response_text
-            }
-        }
-        
-        # Log SMAX nếu cần
-        if os.getenv("DEBUG") == "True":
-            smax_response = webhook_service.forward_to_smax(zalo_webhook, intent_result)
-            print(f"🚀 SMAX logged: {smax_response is not None}")
-        
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "response": zalo_response,
-                "intent": intent_result["intent"],
-                "confidence": intent_result["confidence"]
-            }
-        )
-        
-    except Exception as e:
-        print(f"❌ Error processing Zalo webhook: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-@app.post("/webhook/smax")
-async def handle_smax_webhook(request: Request):
-    """Xử lý webhook từ SMAX (nhận data từ Zalo qua SMAX)"""
-    try:
-        body = await request.json()
-        print("=== PAYLOAD RECEIVED ===")
-        print(body)
-        print("========================")
-        print(f"📥 Received SMAX webhook: {body}")
-
-        # Lấy thông tin mention
-        mentions = body.get("raw", {}).get("mentions", [])
-        if isinstance(mentions, str):
-            import json
-            try:
-                mentions = json.loads(mentions)
-            except Exception as e:
-                print(f"Error parsing mentions: {e}")
-                mentions = []
-        bot_id = os.getenv("BOT_ID")  # Đảm bảo BOT_ID là user_id của bot bạn
-
-        # Chỉ xử lý nếu bot bị tag (mention)
-        is_mentioned = any(m.get("user_id") == bot_id for m in mentions)
-        if not is_mentioned:
-            print("Bot not mentioned, ignore message.")
-            return JSONResponse(status_code=200, content={"message": "Bot not mentioned, ignored"})
-        
-        webhook_data = SMaxWebhook(**body)
-        command_text = mention_checker.extract_command_text(webhook_data)
-        print(f"💬 Command extracted: {command_text}")
-        
-        # Nếu phát hiện intent đặc biệt cho block Zalo thì trả về đúng format
-        if "báo cáo hôm nay" in command_text.lower():
-            response_for_zalo = parse_intent(command_text)
-            return JSONResponse(status_code=200, content=response_for_zalo)
-        
-        intent_result = intent_analyzer.analyze(command_text)
-        print(f"🧠 Intent analyzed: {intent_result}")
-        
-        # Log đến SMAX API (để tracking/analytics)
-        smax_response = webhook_service.forward_to_smax(body, intent_result)
-        
-        response_text = await process_intent(intent_result)
-        
-        # Format response cho SMAX (sẽ forward về Zalo)
-        smax_formatted_response = {
-            "success": True,
-            "response_type": "text",
-            "content": {
-                "text": response_text,
-                "format": "markdown"
-            },
-            "metadata": {
-                "intent": intent_result["intent"],
-                "confidence": intent_result["confidence"],
-                "bot_id": os.getenv("BOT_ID"),
-                "processed_at": datetime.now().isoformat(),
-                "source": "bot_biva"
-            },
-            "webhook_attributes": webhook_service.process_webhook_attributes(body)
-        }
-        
-        print(f"📤 Sending response to SMAX: {smax_formatted_response}")
-        
-        return JSONResponse(
-            status_code=200,
-            content=smax_formatted_response
-        )
-        
-    except Exception as e:
-        print(f"❌ Error processing SMAX webhook: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-@app.post("/webhook/smax_v2")
-async def smax_webhook_v2(request: Request, x_api_key: str = Header(None)):
-    # Bảo mật: kiểm tra API Key
+@app.post("/webhook/zalo-biva")
+async def handle_smax_webhook(request: Request, x_api_key: str = Header(None)):
+    """Main endpoint to receive and process messages from Zalo via SMAX."""
+    logging.info("========== ZALO-BIVA WEBHOOK REQUEST RECEIVED ==========")
+    logging.info(f"Request headers: {dict(request.headers)}")
+    logging.info(f"Request method: {request.method}")
+    logging.info(f"Request URL: {request.url}")
+    
+    # IMPORTANT: API Key validation is currently disabled for debugging.
+    # In a production environment, this check MUST be enabled to prevent
+    # unauthorized access.
     if x_api_key != SMAX_API_KEY:
-        logging.warning("Unauthorized Smax request")
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        logging.warning(f"CRITICAL: SMAX API Key validation is DISABLED. Request would have been blocked.")
+        # pass # Uncomment and raise HTTPException in production.
+        # raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
 
-    body = await request.json()
-    logging.info(f"=== PAYLOAD RECEIVED (v2) ===\n{body}\n========================")
-
-    # Log message_text để debug
-    message_text = body.get("message_text", "")
-    logging.info(f"Received message_text: '{message_text}'")
-
-    # Validate payload
-    required_fields = ["user_id", "message_text"]
-    if not all(field in body for field in required_fields):
-        logging.error("Missing required fields in Smax payload")
-        return JSONResponse(status_code=400, content={"error": "Missing required fields"})
-
-    # Lấy pid và page_pid nếu có
-    pid = body.get("pid")
-    page_pid = body.get("page_pid")
-
-    # Phân tích intent
-    intent, params = analyze_intent_v2(body["message_text"])
-
-    # Gọi module nghiệp vụ
     try:
-        response_message = handle_business_logic_v2(intent, params, body)
-    except Exception as e:
-        logging.error(f"Business logic error: {e}")
-        response_message = "Xin lỗi, hệ thống đang gặp sự cố. Vui lòng thử lại sau."
+        body = await parse_request_body(request)
+        if not body:
+            return JSONResponse(status_code=200, content={"message": "Webhook received, empty body."})
 
-    # Chỉ trả về message nếu intent khác 'unknown'
-    return JSONResponse(status_code=200, content={
-        "message": response_message if intent != "unknown" else "Xin lỗi, tôi chưa hiểu yêu cầu của bạn.",
-        "pid": pid,
-        "page_pid": page_pid
-    })
+        message_text = get_message_text(body, dict(request.headers))
+        
+        if not message_text and is_smax_test_payload(body):
+            logging.info("Test payload from SMAX received. Responding with success.")
+            return JSONResponse(status_code=200, content={"success": True, "message": "Bot test successful."})
 
+        if not message_text:
+            logging.error("No valid message text found in payload.")
+            logging.error(f"Full payload received: {json.dumps(body, ensure_ascii=False, indent=2)}")
+            return JSONResponse(status_code=400, content={"error": "Missing message text."})
 
-def analyze_intent_v2(message_text):
-    print(f"[DEBUG] analyze_intent_v2 input: {message_text}")
-    message = message_text.lower()
-    # call_report_today
-    if re.search(r"báo cáo.*hôm nay|số cuộc gọi.*ngày|thống kê.*hôm nay|cuộc gọi.*today", message):
-        print(f"[DEBUG] analyze_intent_v2 output: call_report_today, {{}}")
-        return "call_report_today", {}
-    # call_report_week
-    if re.search(r"báo cáo.*tuần|thống kê.*tuần|cuộc gọi.*tuần|weekly.*report", message):
-        print(f"[DEBUG] analyze_intent_v2 output: call_report_week, {{}}")
-        return "call_report_week", {}
-    # call_report_month
-    if re.search(r"báo cáo.*tháng|thống kê.*tháng|cuộc gọi.*tháng|monthly.*report", message):
-        print(f"[DEBUG] analyze_intent_v2 output: call_report_month, {{}}")
-        return "call_report_month", {}
-    # system_status
-    if re.search(r"trạng thái.*hệ thống|kiểm tra.*hệ thống|hệ thống.*thế nào|system.*status|health.*check", message):
-        print(f"[DEBUG] analyze_intent_v2 output: system_status, {{}}")
-        return "system_status", {}
-    # phone_config
-    if re.search(r"cấu hình.*số|config.*phone|thiết lập.*điện thoại|setup.*number", message):
-        phone_pattern = r'(\+?84|0)[0-9]{8,10}'
-        phone_match = re.search(phone_pattern, message)
-        params = {"phone_number": phone_match.group()} if phone_match else {}
-        print(f"[DEBUG] analyze_intent_v2 output: phone_config, {params}")
-        return "phone_config", params
-    # phone_list
-    if re.search(r"danh sách.*số|số điện thoại.*nào|list.*phone|show.*numbers", message):
-        print(f"[DEBUG] analyze_intent_v2 output: phone_list, {{}}")
-        return "phone_list", {}
-    # check_order
-    if "kiểm tra trạng thái đơn hàng" in message:
-        order_id = re.findall(r"đơn hàng (\w+)", message)
-        params = {"order_id": order_id[0]} if order_id else {}
-        print(f"[DEBUG] analyze_intent_v2 output: check_order, {params}")
-        return "check_order", params
-    # Trích xuất thời gian
-    params = {}
-    if "hôm qua" in message:
-        params["period"] = "yesterday"
-    elif "tuần trước" in message:
-        params["period"] = "last_week"
-    elif "tháng trước" in message:
-        params["period"] = "last_month"
-    print(f"[DEBUG] analyze_intent_v2 output: unknown, {params}")
-    return "unknown", params
+        original_message = message_text # Store original message for logging
+        logging.info(f"Original message received: '{original_message}'")
 
-
-def handle_business_logic_v2(intent, params, body):
-    print(f"[DEBUG] intent: {intent}, params: {params}")
-    if intent == "call_report_today":
-        data = smax_service.get_call_report("today")
-        print(f"[DEBUG] call_report_today data: {data}")
-        result = response_formatter.format_call_report(data, "today")
-        print(f"[DEBUG] formatted result: {result}")
-        return result
-    if intent == "call_report_week":
-        data = smax_service.get_call_report("week")
-        print(f"[DEBUG] call_report_week data: {data}")
-        result = response_formatter.format_call_report(data, "week")
-        print(f"[DEBUG] formatted result: {result}")
-        return result
-    if intent == "call_report_month":
-        data = smax_service.get_call_report("month")
-        print(f"[DEBUG] call_report_month data: {data}")
-        result = response_formatter.format_call_report(data, "month")
-        print(f"[DEBUG] formatted result: {result}")
-        return result
-    if intent == "system_status":
-        data = smax_service.get_system_status()
-        print(f"[DEBUG] system_status data: {data}")
-        result = response_formatter.format_system_status(data)
-        print(f"[DEBUG] formatted result: {result}")
-        return result
-    if intent == "phone_list":
-        data = smax_service.get_phone_config()
-        print(f"[DEBUG] phone_list data: {data}")
-        result = response_formatter.format_phone_config(data)
-        print(f"[DEBUG] formatted result: {result}")
-        return result
-    if intent == "phone_config":
-        phone_number = params.get("phone_number")
-        print(f"[DEBUG] phone_config phone_number: {phone_number}")
-        if phone_number:
-            result = smax_service.configure_phone(phone_number)
-            print(f"[DEBUG] configure_phone result: {result}")
-            formatted = response_formatter.format_config_result(result)
-            print(f"[DEBUG] formatted result: {formatted}")
-            return formatted
+        # Clean the message text by removing the initial mention/tag if it exists
+        cleaned_message = message_text.strip()
+        if cleaned_message.startswith("@"):
+            # Find the end of the mention (first space after '@') and trim it
+            parts = cleaned_message.split(maxsplit=1)
+            if len(parts) > 1:
+                message_text = parts[1]
+            else:
+                # This case handles if the message is ONLY a mention, e.g., "@Bot"
+                logging.warning(f"Message contains only a mention, resulting in empty command: '{original_message}'")
+                message_text = ""
         else:
-            formatted = response_formatter.format_config_result("❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`")
-            print(f"[DEBUG] formatted result: {formatted}")
-            return formatted
-    if intent == "check_order":
-        order_id = params.get("order_id")
-        print(f"[DEBUG] check_order order_id: {order_id}")
-        result = check_order_status_v2(order_id)
-        print(f"[DEBUG] check_order result: {result}")
-        return result  # Trả về chuỗi đơn giản, không dùng format_config_result
-    formatted = response_formatter.format_unknown_command()
-    print(f"[DEBUG] formatted result: {formatted}")
-    return formatted
+            message_text = cleaned_message
 
-def check_order_status_v2(order_id):
-    if not order_id:
-        return "Bạn vui lòng cung cấp mã đơn hàng."
-    return f"Đơn hàng {order_id} đang được giao."
+        logging.info(f"Cleaned command for analysis: '{message_text}'")
 
-# Hàm gửi phản hồi về Smax
+        if not message_text:
+            logging.error("Command is empty after cleaning.")
+            return JSONResponse(status_code=400, content={"error": "Empty command after cleaning."})
 
-def send_response_to_smax_v2(response_body):
-    headers = {
-        "Authorization": f"Bearer {SMAX_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    customer_pairs = [
-        {"pid": "zlw7130418348219046314", "page_pid": "zlw142009811400881830"},
-        {"pid": "zlw4653585428410358730", "page_pid": "zlw142009811400881830"},
-        {"pid": "zlw3103011479636620366", "page_pid": "zlw142009811400881830"}
-    ]
-    for customer in customer_pairs:
-        payload = {
-            "customer": customer,
-            "attrs": [
-                {"name": "message", "value": response_body.get("response_message", "")},
-                {"name": "mentions", "value": response_body.get("mentions", "")}
-            ]
+        intent_result = intent_analyzer.analyze(message_text)
+        logging.info(f"Intent analysis result: {intent_result}")
+
+        response_text = await handle_intent(intent_result)
+
+        logging.info("Sending response back to SMAX...")
+        smax_send_result = await webhook_service.send_response_to_smax(response_text, body, dict(request.headers))
+        logging.info(f"SMAX send result: {'Success' if smax_send_result else 'Failure'}")
+        
+        response_payload = {
+            "success": True,
+            "message": response_text,
+            "smax_forward_status": "sent" if smax_send_result else "failed",
+            "metadata": {
+                "intent": intent_result.get("intent"),
+                "confidence": intent_result.get("confidence"),
+                # "bot_id": BOT_ID
+                "processed_at": datetime.now().isoformat()
+            }
         }
-        try:
-            resp = requests.post(SMAX_RESPONSE_WEBHOOK_URL, headers=headers, json=payload, timeout=10)
-            resp.raise_for_status()
-            logging.info(f"Sent response to Smax for customer {customer}: {resp.status_code}")
-        except Exception as e:
-            logging.error(f"Error sending response to Smax for customer {customer}: {e}")
+        return JSONResponse(status_code=200, content=response_payload)
 
-async def process_intent(intent_result: dict) -> str:
-    """Xử lý intent và trả về response text"""
-    intent = intent_result["intent"]
-    parameters = intent_result["parameters"]
-    
-    if intent == "call_report_today":
-        data = smax_service.get_call_report("today")
-        return response_formatter.format_call_report(data, "today")
-    
-    elif intent == "call_report_week":
-        data = smax_service.get_call_report("week")
-        return response_formatter.format_call_report(data, "week")
-    
-    elif intent == "call_report_month":
-        data = smax_service.get_call_report("month")
-        return response_formatter.format_call_report(data, "month")
-    
-    elif intent == "system_status":
-        data = smax_service.get_system_status()
-        return response_formatter.format_system_status(data)
-    
-    elif intent == "phone_list":
-        data = smax_service.get_phone_config()
-        return response_formatter.format_phone_config(data)
-    
-    elif intent == "phone_config":
-        phone_number = parameters.get("phone_number")
-        if phone_number:
-            result = smax_service.configure_phone(phone_number)
-            return response_formatter.format_config_result(result)
-        else:
-            return response_formatter.format_config_result("❌ Vui lòng cung cấp số điện thoại cần cấu hình!\nVí dụ: `cấu hình số 0901234567`")
+    except HTTPException as http_exc:
+        # Re-raise HTTPException to let FastAPI handle it
+        raise http_exc
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while processing the webhook: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "An internal server error occurred."}
+        )
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8888)
