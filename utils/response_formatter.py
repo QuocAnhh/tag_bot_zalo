@@ -2,7 +2,10 @@ from typing import Dict, Any
 from datetime import datetime
 
 class ResponseFormatter:
-    
+    @staticmethod
+    def _now_str() -> str:
+        return datetime.now().strftime('%H:%M %d/%m/%Y')
+
     @staticmethod
     def format_call_report(data: Dict[str, Any], period: str = "today") -> str:
         """Format báo cáo cuộc gọi"""
@@ -14,7 +17,7 @@ class ResponseFormatter:
 ❌ Thất bại: {data['failed_calls']}
 ⏱️ Thời lượng TB: {data['avg_duration']}
 
-_Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
+_Cập nhật lúc: {ResponseFormatter._now_str()}_"""
         
         elif period == "week":
             daily_str = "\n".join([f"  • {day['date']}: {day['calls']} cuộc gọi" 
@@ -28,7 +31,7 @@ _Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
 📈 **Chi tiết theo ngày:**
 {daily_str}
 
-_Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
+_Cập nhật lúc: {ResponseFormatter._now_str()}_"""
         
         elif period == "month":
             return f"""📈 **BÁO CÁO THÁNG**
@@ -37,7 +40,7 @@ _Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
 📊 Tăng trưởng: {data['growth_rate']}
 🕒 Giờ cao điểm: {data['busiest_hour']}
 
-_Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
+_Cập nhật lúc: {ResponseFormatter._now_str()}_"""
     
     @staticmethod
     def format_system_status(data: Dict[str, Any]) -> str:
@@ -58,7 +61,7 @@ _Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
 📞 Đường dây hoạt động: {data['active_lines']}/10
 ⏰ Hàng đợi: {data['queue_length']} cuộc gọi
 
-_Kiểm tra lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
+_Kiểm tra lúc: {ResponseFormatter._now_str()}_"""
     
     @staticmethod
     def format_phone_config(data: Dict[str, Any]) -> str:
@@ -74,22 +77,21 @@ _Kiểm tra lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
 🟢 Đang hoạt động: {data['active_lines']}
 🕒 Thay đổi cuối: {data['last_config_change']}
 
-_Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}_"""
+_Cập nhật lúc: {ResponseFormatter._now_str()}_"""
     
     @staticmethod
     def format_config_result(result: Dict[str, Any]) -> str:
         """Format kết quả cấu hình"""
         if result['success']:
-            config = result['new_config']
+            c = result['new_config']
             return f"""✅ **CẤU HÌNH THÀNH CÔNG**
 
-📱 Số điện thoại: {config['phone']}
-🔄 Trạng thái: {config['status']}
-🕒 Thời gian: {config['configured_at']}
+📱 Số điện thoại: {c['phone']}
+🔄 Trạng thái: {c['status']}
+🕒 Thời gian: {c['configured_at']}
 
 Số điện thoại đã sẵn sàng sử dụng! 🎉"""
-        else:
-            return f"""❌ **CẤU HÌNH THẤT BẠI**
+        return f"""❌ **CẤU HÌNH THẤT BẠI**
 
 📱 Số: {result.get('phone', 'N/A')}
 💬 Lỗi: {result['message']}
